@@ -1,26 +1,77 @@
 name: Update UT1 redirector list
+
 on:
   schedule:
     - cron: "0 3 * * *"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: update-ut1-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-      - name: Fetch list
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Download and validate redirector list
+        shell: bash
         run: |
-          curl -fsSL https://dsi.ut-capitole.fr/blacklists/download/redirector.tar.gz -o r.tar.gz
-          tar -xzf r.tar.gz
-          cp redirector/domains ut1-redirector.txt
-          rm -rf r.tar.gz redirector
+          set -euo pipefail
+          curl --fail --show-error --silent --location \
+            --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 120 \
+            --max-filesize 30M \
+            --proto '=https' --tlsv1.2 \
+            https://dsi.ut-capitole.fr/blacklists/download/redirector.tar.gz \
+            --output r.tar.gz
+          python3 - <<'PY'
+          import shutil
+          import tarfile
+
+          expected = "redirector/domains"
+          allowed = {
+              "redirector/domains",
+              "redirector/urls",
+              "redirector/expressions",
+              "redirector/usage",
+          }
+          max_size = 25 * 1024 * 1024
+          with tarfile.open("r:gz") as archive:
+              members = archive.getmembers()
+              normalized = [(member, member.name.removeprefix("./").rstrip("/")) for member in members]
+              names = [name for _, name in normalized]
+              if len(members) > len(allowed) or len(names) != len(set(names)):
+                  raise SystemExit("Archive contains too many or duplicate files")
+              if any(name not in allowed or not member.isfile() for member, name in normalized):
+                  raise SystemExit("Archive contains an unexpected path or file type")
+              matches = [member for member, name in normalized if name == expected]
+              if len(matches) != 1:
+                  raise SystemExit("Archive must contain exactly one redirector/domains file")
+              source_file = matches[0]
+              if source_file.size <= 0 or source_file.size > max_size:
+                  raise SystemExit("Redirector list has an invalid size")
+              source = archive.extractfile(source_file)
+              if source is None:
+                  raise SystemExit("Could not read redirector/domains from archive")
+              with source, open("ut1-redirector.txt", "wb") as destination:
+                  shutil.copyfileobj(source, destination)
+          PY
+          rm r.tar.gz
       - name: Commit if changed
+        shell: bash
         run: |
+          set -euo pipefail
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add ut1-redirector.txt
-          git diff --staged --quiet || (git commit -m "Update UT1 redirector list" && git push)
+          git add -- ut1-redirector.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "Update UT1 redirector list"
+            git push
+          fi
