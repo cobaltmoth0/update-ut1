@@ -43,7 +43,7 @@ jobs:
               "redirector/usage",
           }
           max_size = 25 * 1024 * 1024
-          with tarfile.open("r:gz") as archive:
+          with tarfile.open("r.tar.gz", mode="r:gz") as archive:
               members = archive.getmembers()
               normalized = [(member, member.name.removeprefix("./").rstrip("/")) for member in members]
               names = [name for _, name in normalized]
